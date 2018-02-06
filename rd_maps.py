@@ -7,6 +7,7 @@ import time
 import csv
 import argparse
 
+import multiprocessing as mp
 """
 Re-implementation of:
 https://github.com/rob123king/EMS_test_scripts/blob/master/Dragen_VCF_filtering2.pl
@@ -90,6 +91,17 @@ def slurmMultiJob(cmds, sentinels, p='ei-medium', mem='8GB', c=1, timelimit_s=24
             break
         time.sleep(wait_s)
 
+def runJob(cmd):
+    sp = sub.Popen(cmd, stdout=sub.PIPE, stderr=sub.PIPE, shell=True)
+    o, e = sp.communicate()
+    return o, e
+
+def runJobs(jobs, nthreads=16):
+    pool = mp.Pool(processes=nthreads)
+    results = [pool.apply_async(runJob, args=(job,)) for job in jobs]
+    output = [p.get() for p in results]
+    print(output)
+
 
 if __name__ == '__main__':
 
@@ -101,6 +113,8 @@ if __name__ == '__main__':
     ap.add_argument('--min-libs', type=int, default=24)
     ap.add_argument('--min-het', type=int, default=5)
     ap.add_argument('--min-hom', type=int, default=3)
+    ap.add_argument('--use-slurm', action='store_true')
+    ap.add_argument('--threads', '-t', type=int, default=4)
     ap.add_argument('sampledirs_file')
     args = ap.parse_args()
    
@@ -141,20 +155,35 @@ if __name__ == '__main__':
         print(bamfiles, vcffiles) 
 
     if not os.path.exists(VCFMERGE_DONE): 
-        cmd = VCFMERGE.format(' '.join(vcffiles), VCFMERGE_OUTPUT, VCFMERGE_DONE)
-        slurmJob(cmd, [VCFMERGE_DONE], mem='64GB')
+        if args.use_slurm:
+            cmd = VCFMERGE.format(' '.join(vcffiles), VCFMERGE_OUTPUT, VCFMERGE_DONE)
+            slurmJob(cmd, [VCFMERGE_DONE], mem='64GB')
+        else:
+            VCFMERGE = "vcf-merge {} | grep -v '#' | cut -f 1,2 | awk -v OFS='\\t' '{{ print $1,$2-1,$2; }}' > {}; touch {};"
+            cmd = VCFMERGE.format(' '.join(vcffiles), VCFMERGE_OUTPUT, VCFMERGE_DONE)
+            sp = sub.Popen(cmd, shell=True, stdout=sub.PIPE, stderr=sub.PIPE)
+            o, e = sp.communicate()
+            print("VCFMERGE_STEP", o, e, sep="\n")
 
     if not os.path.exists(MULTICOV_DONE):
         mbedfiles = list(splitInputFile(VCFMERGE_OUTPUT))
-        with open(MULTICOV_INPUT, 'w') as mbedfiles_f:
-            print(*mbedfiles, sep='\n', file=mbedfiles_f)
-        donefiles = list(f + '.done' for f in mbedfiles)
         mincovfiles = list(f + '.mincov' for f in mbedfiles)
-        cmd = MULTICOV_ARRAY.format(MULTICOV_INPUT, ' '.join(bamfiles), args.min_libs)
-        slurmJob(cmd, donefiles, arraylen=len(mbedfiles))
-        
-        with open(MULTICOV_DONE, 'w'):
+        if args.use_slurm:
+            with open(MULTICOV_INPUT, 'w') as mbedfiles_f:
+                print(*mbedfiles, sep='\n', file=mbedfiles_f)
+            donefiles = list(f + '.done' for f in mbedfiles)
+            cmd = MULTICOV_ARRAY.format(MULTICOV_INPUT, ' '.join(bamfiles), args.min_libs)
+            slurmJob(cmd, donefiles, arraylen=len(mbedfiles))
+        else:
+            MULTICOV = "bed={}; bedtools multicov -q 1 -p -bams {} -bed $bed | awk -v OFS='\\t' -v mins={} '{{ c=0; for(i = 4; i <= NF; i++) {{ if ($i > 0) c++; }}; if (c >= mins) print $0; }}' > $bed.mincov; touch $bed.done;"
+            jobs = list()
+            for mbf in mbedfiles:
+                jobs.append(MULTICOV.format(mbf, ' '.join(bamfiles), args.min_libs))
+            runJobs(jobs, nthreads=args.threads)
             pass
+
+        with open(MULTICOV_DONE, 'w'):      
+            pass 
     else:
         mincovfiles = glob.glob(os.path.join(workdir, '*.mincov'))
     
@@ -164,13 +193,19 @@ if __name__ == '__main__':
 
     if not os.path.exists(DIFILTER_DONE):
         donefiles, fvcffiles, jobs = list(), list(), list()
+        if not args.use_slurm:     
+            DIFILTER = "gzip -dc {0} | awk -F'\\t' '/^#/{{ print $0; next; }}; NR==FNR{{c[$1$3]++; next; }}; c[$1$2] > 0' {1} - | awk -v OFS='\\t' '/^#/{{print $0; next;}} {{ split($10, data, \":\"); split(data[2], ad, \",\"); if (data[1] == \"0/1\" && (ad[1] > 0 || ad[2] > 0)) {{ if ( ad[2] / (ad[1] + ad[2]) > 0.1999 && ad[2] >= {4}) print $0; }} else if (data[1] == \"1/1\" && ad[2] >= {5}) print $0; }}' | bgzip -c > {2} && tabix -p vcf {2}; touch {3};"
         for vf in vcffiles:
             prefix = os.path.join(workdir, os.path.basename(vf))
             donefiles.append(prefix + '.done')
             fvcffiles.append(prefix.replace('.vcf.nod.gz', '.filtered.vcf.gz'))
             cmd = DIFILTER.format(vf, MULTICOV_OUTPUT, fvcffiles[-1], donefiles[-1], args.min_het, args.min_hom)
             jobs.append(cmd)
-        slurmMultiJob(jobs, donefiles)
+        if args.use_slurm:
+            slurmMultiJob(jobs, donefiles)
+        else:
+            runJobs(jobs, nthreads=args.threads)
+            pass
 
         with open(DIFILTER_DONE, 'w'):
             pass 	
@@ -181,16 +216,21 @@ if __name__ == '__main__':
     if not os.path.exists(INTERSECT_DONE):
         donefiles, uniqfiles, jobs = list(), list(), list()
         isect_sets = set(fvcffiles)
+        if not args.use_slurm:
+            INTERSECT = "vcf-isec -f -c {} {} > {}; touch {};"
         for vf in fvcffiles:
             donefiles.append(vf + '.done')
             uniqfiles.append(vf.replace('.filtered.vcf.gz', '.uniq.vcf'))
             cmd = INTERSECT.format(vf, ' '.join(isect_sets.difference([vf])), uniqfiles[-1], donefiles[-1])
             jobs.append(cmd)
-        slurmMultiJob(jobs, donefiles)
+        if args.use_slurm:
+            slurmMultiJob(jobs, donefiles)
+        else:
+            runJobs(jobs, nthreads=args.threads)
+            pass
 
         with open(INTERSECT_DONE, 'w'):
             pass
-
     else:
         uniqfiles = list(vf.replace('.filtered.vcf.gz', '.uniq.vcf') for vf in fvcffiles)
 
