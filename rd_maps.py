@@ -8,6 +8,10 @@ import csv
 import argparse
 
 import multiprocessing as mp
+
+assert sys.version_info.major == 3, "Python3 required to run RoyalDragen"
+
+
 """
 Re-implementation of:
 https://github.com/rob123king/EMS_test_scripts/blob/master/Dragen_VCF_filtering2.pl
