@@ -152,7 +152,7 @@ if __name__ == '__main__':
     bamfiles = list(os.path.join('/'.join(path.strip().split('/')), path.strip().split('/')[-1] + '.iwgsc10.bam') for path in directories)
     assert all(map(os.path.exists, bamfiles)), "Missing one or more bamfiles"
     bam_indexes = list(map(lambda s:s+".bai", bamfiles))
-    assert all(map(os.path.exists, bam_indexes), "Missing one or more bam-indexes for bamfiles"
+    assert all(map(os.path.exists, bam_indexes)), "Missing one or more bam-indexes for bamfiles"
     if args.verbose:
         print(bamfiles, vcffiles) 
 
