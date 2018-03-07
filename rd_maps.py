@@ -101,9 +101,14 @@ def runJob(cmd):
     return o, e
 
 def runJobs(jobs, nthreads=16):
-    pool = mp.Pool(processes=nthreads)
-    results = [pool.apply_async(runJob, args=(job,)) for job in jobs]
-    output = [p.get() for p in results]
+    output = "Something went wrong."
+    try:
+        pool = mp.Pool(processes=nthreads)
+        results = [pool.apply_async(runJob, args=(job,)) for job in jobs]
+        output = [p.get() for p in results]
+    finally:
+        pool.close()
+        pool.join()
     print(output)
 
 
